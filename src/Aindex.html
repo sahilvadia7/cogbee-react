@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Multi-User WebRTC Room</title>
+
+    <style>
+        body { font-family: sans-serif; background: #f7f7f7; padding: 20px; }
+        
+        #videos {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 16px;
+            padding: 20px;
+        }
+
+        video {
+            width: 100%;
+            background: #000;
+            border-radius: 6px;
+        }
+
+        #roomBox, #createRoomBox {
+            margin-bottom: 20px;
+        }
+
+        input {
+            padding: 8px;
+            width: 230px;
+            font-size: 16px;
+        }
+
+        button {
+            padding: 10px 20px;
+            margin-left: 10px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        #shareLink, #createdLinkBox {
+            margin-top: 10px;
+            padding: 10px;
+            background: #eee;
+            border-radius: 6px;
+            display: none;
+        }
+
+        #transcriptBox {
+            background: #fff;
+            padding: 10px;
+            margin-top: 20px;
+            border-radius: 6px;
+            white-space: pre-wrap;
+            min-height: 50px;
+        }
+    </style>
+</head>
+
+<body>
+
+<h2>Multi-User WebRTC Demo</h2>
+
+<!-- Create Room -->
+<div id="createRoomBox">
+    <button onclick="createRoom()">Create New Room</button>
+    <div id="createdLinkBox"></div>
+</div>
+
+<!-- Join Room -->
+<div id="roomBox">
+    <input id="roomInput" placeholder="Enter Room ID" />
+    <button id="joinBtn">Join Room</button>
+    <div id="shareLink"></div>
+</div>
+
+<!-- Controls -->
+<div style="margin-top:20px;">
+    <button id="startAnswer">Start Answer</button>
+    <button id="stopAnswer" disabled>Stop Answer</button>
+</div>
+
+<!-- Transcript -->
+<h3>Transcript:</h3>
+<pre id="transcriptBox"></pre>
+
+<!-- Video Area -->
+<div id="videos">
+    <video id="localVideo" autoplay muted playsinline></video>
+</div>
+
+<script>
+
+    // --------------------------------------------------------
+    // ROOM & SIGNALING SETUP
+    // --------------------------------------------------------
+
+    const urlParams = new URLSearchParams(window.location.search);
+    let roomId = urlParams.get("room");
+
+    const ws = new WebSocket("ws://localhost:8080/signal");
+
+    let localStream;
+    let peers = {};
+    let myId = null;
+
+    // Create new random room
+    function createRoom() {
+        const id = Math.random().toString(36).substring(2, 10);
+        const link = `${location.origin}${location.pathname}?room=${id}`;
+
+        const box = document.getElementById("createdLinkBox");
+        box.style.display = "block";
+        box.innerHTML = `Room Created!<br>Share this link:<br><b>${link}</b>`;
+    }
+
+    // Start camera & mic
+    async function initLocalStream() {
+        localStream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true
+        });
+
+        document.getElementById("localVideo").srcObject = localStream;
+    }
+    initLocalStream();
+
+    // Manual join
+    document.getElementById("joinBtn").onclick = () => {
+        const id = document.getElementById("roomInput").value.trim();
+        if (!id) return alert("Enter a room id!");
+        joinRoom(id);
+    };
+
+    // Auto join if URL contains ?room=xxx
+    ws.onopen = () => {
+        if (roomId) joinRoom(roomId);
+    };
+
+    function joinRoom(id) {
+        roomId = id;
+
+        ws.send(JSON.stringify({ type: "join", roomId: id }));
+
+        const link = `${location.origin}${location.pathname}?room=${id}`;
+        const box = document.getElementById("shareLink");
+        box.style.display = "block";
+        box.innerHTML = `Invite others:<br><b>${link}</b>`;
+
+        document.getElementById("roomBox").style.display = "none";
+    }
+
+    // Handle WebSocket messages
+    ws.onmessage = async (msg) => {
+        const data = JSON.parse(msg.data);
+
+        if (data.type === "id") { myId = data.id; return; }
+
+        if (data.type === "peers") {
+            for (let peerId of data.peers) {
+                await createPeerConnection(peerId, true);
+            }
+            return;
+        }
+
+        if (data.type === "offer") await handleOffer(data);
+        if (data.type === "answer") await handleAnswer(data);
+        if (data.type === "candidate") await handleCandidate(data);
+        if (data.type === "leave") removeVideo(data.from);
+    };
+
+    // --------------------------------------------------------
+    // WEBRTC PEER CONNECTION
+    // --------------------------------------------------------
+
+    async function createPeerConnection(peerId, isCaller) {
+        const pc = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+        });
+
+        peers[peerId] = pc;
+
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                ws.send(JSON.stringify({
+                    type: "candidate",
+                    candidate: event.candidate,
+                    to: peerId,
+                    from: myId
+                }));
+            }
+        };
+
+        pc.ontrack = (event) => addRemoteVideo(peerId, event.streams[0]);
+
+        if (isCaller) {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            ws.send(JSON.stringify({
+                type: "offer",
+                offer,
+                to: peerId,
+                from: myId
+            }));
+        }
+    }
+
+    async function handleOffer(data) {
+        const peerId = data.from;
+
+        if (!peers[peerId]) await createPeerConnection(peerId, false);
+
+        const pc = peers[peerId];
+        await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        ws.send(JSON.stringify({
+            type: "answer",
+            answer,
+            to: peerId,
+            from: myId
+        }));
+    }
+
+    async function handleAnswer(data) {
+        const pc = peers[data.from];
+        if (pc) {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        }
+    }
+
+    async function handleCandidate(data) {
+        const pc = peers[data.from];
+        if (pc) {
+            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        }
+    }
+
+    function addRemoteVideo(peerId, stream) {
+        let video = document.getElementById("video-" + peerId);
+        if (!video) {
+            video = document.createElement("video");
+            video.id = "video-" + peerId;
+            video.autoplay = true;
+            video.playsinline = true;
+            document.getElementById("videos").appendChild(video);
+        }
+        video.srcObject = stream;
+    }
+
+    function removeVideo(peerId) {
+        const video = document.getElementById("video-" + peerId);
+        if (video) video.remove();
+        if (peers[peerId]) peers[peerId].close();
+        delete peers[peerId];
+    }
+
+    // --------------------------------------------------------
+    // RECORD FULL VIDEO ANSWER (Your Requirement)
+    // --------------------------------------------------------
+
+    let answerRecorder;
+    let recordedChunks = [];
+
+    document.getElementById("startAnswer").onclick = () => {
+        if (!localStream) {
+            alert("Local stream not ready");
+            return;
+        }
+
+        recordedChunks = [];
+
+        answerRecorder = new MediaRecorder(localStream, {
+            mimeType: "video/webm"
+        });
+
+        answerRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+                recordedChunks.push(event.data);
+            }
+        };
+
+        answerRecorder.start();
+
+        document.getElementById("startAnswer").disabled = true;
+        document.getElementById("stopAnswer").disabled = false;
+
+        console.log("🎥 Recording candidate answer...");
+    };
+
+    document.getElementById("stopAnswer").onclick = () => {
+        answerRecorder.stop();
+
+        document.getElementById("startAnswer").disabled = false;
+        document.getElementById("stopAnswer").disabled = true;
+
+        console.log("📁 Finalizing video...");
+    };
+
+    // Upload when recording finishes
+    function uploadAnswer() {
+        const blob = new Blob(recordedChunks, { type: "video/webm" });
+        const file = new File([blob], "answer.webm", { type: "video/webm" });
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        console.log("⬆ Uploading answer video...");
+
+        fetch("http://localhost:8080/api/interview/answer-video", {
+            method: "POST",
+            body: formData
+        })
+        .then(res => res.text())
+        .then(text => {
+            console.log("🟢 TRANSCRIPT:", text);
+            document.getElementById("transcriptBox").innerText = text;
+        });
+    }
+
+    // attach upload to stop event
+    document.addEventListener("stop", function(){
+        uploadAnswer();
+    });
+
+    // event listener inside the recorder
+    const originalStop = MediaRecorder.prototype.stop;
+    MediaRecorder.prototype.stop = function(){
+        originalStop.call(this);
+        setTimeout(uploadAnswer, 500); // wait a bit then upload
+    };
+
+</script>
+
+</body>
+</html>
