@@ -21,7 +21,6 @@ export default function WebRTCRoom() {
   // Use env in real app: import.meta.env.VITE_API_BASE or process.env.REACT_APP_API_BASE
   const API_BASE = "https://delmar-drearier-arvilla.ngrok-free.dev";
 
-  // WebSocket should be a ref (not state) to avoid stale closures
   const wsRef = useRef(null);
 
   // ------------------------------------------------------------
@@ -81,6 +80,8 @@ export default function WebRTCRoom() {
         if (!roomId) {
           setRoomId(initialRoom);
         }
+
+        if (wsRef.current) return; 
 
         const socket = new WebSocket(
           "wss://delmar-drearier-arvilla.ngrok-free.dev/signal"
