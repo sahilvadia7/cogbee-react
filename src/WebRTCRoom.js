@@ -2,16 +2,17 @@ import { useEffect, useRef, useState } from "react";
 
 export default function WebRTCRoom() {
   const localVideoRef = useRef(null);
-  const videosRef = useRef(null);
 
   const sttRecorderRef = useRef(null);
   const sessionIdRef = useRef(null);
 
   const [roomId, setRoomId] = useState("");
-  const [isJoined, setIsJoined] = useState("");
+  const [isJoined, setIsJoined] = useState(false);
   const [myId, setMyId] = useState(null);
   const [localStream, setLocalStream] = useState(null);
   const peersRef = useRef({});
+
+  const [remoteStreams, setRemoteStreams] = useState({});
 
   const [createdLink, setCreatedLink] = useState("");
   const [shareLink, setShareLink] = useState("");
@@ -50,12 +51,6 @@ export default function WebRTCRoom() {
     return Math.random().toString(36).slice(2, 14);
   };
 
-  const stopLocalStream = () => {
-    if (localStream) {
-      localStream.getTracks().forEach((t) => t.stop());
-    }
-  };
-
   const closeAllPeers = () => {
     Object.values(peersRef.current).forEach((pc) => {
       try {
@@ -65,6 +60,7 @@ export default function WebRTCRoom() {
       }
     });
     peersRef.current = {};
+    setRemoteStreams({});
   };
 
   const updateRemoteSubtitle = (peerId, text) => {
@@ -89,7 +85,6 @@ export default function WebRTCRoom() {
       try {
         console.log("Requesting camera/mic...");
 
-        // 1️⃣ GET USER MEDIA FIRST — block everything until this finishes
         const stream = await navigator.mediaDevices.getUserMedia({
           video: true,
           audio: true,
@@ -104,7 +99,6 @@ export default function WebRTCRoom() {
           localVideoRef.current.srcObject = stream;
         }
 
-        // 2️⃣ ONLY NOW create WebSocket
         console.log("Connecting WebSocket...");
         const socket = new WebSocket(
           "wss://delmar-drearier-arvilla.ngrok-free.dev/signal"
@@ -141,7 +135,9 @@ export default function WebRTCRoom() {
       isMounted = false;
       if (wsRef.current) wsRef.current.close();
       if (localStream) localStream.getTracks().forEach((t) => t.stop());
+      closeAllPeers();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ------------------------------------------------------------
@@ -159,37 +155,47 @@ export default function WebRTCRoom() {
         break;
       }
 
-      // List of peers already in the room (when *you* join)
+      // YOU just joined, server gives existing peers → YOU CALL THEM
       case "peers": {
         if (Array.isArray(data.peers)) {
           console.log("Existing peers in room:", data.peers);
+
           for (const peerId of data.peers) {
             if (!peerId) continue;
-            await createPeer(peerId, true, socket); // we are the caller
+
+            console.log("Calling existing peer:", peerId);
+            await createPeer(peerId, true); // isCaller = true
           }
         }
         break;
       }
 
-      // A new peer joined after you — server notifies you
+      // A new peer joined after you → THEY WILL CALL YOU
       case "new_peer": {
-        const peerId = data.peerId; // <-- FIX HERE
+        const peerId = data.peerId;
         console.log("New peer joined:", peerId);
-        if (peerId && !peersRef.current[peerId]) {
-          await createPeer(peerId, true, socket);
+
+        if (!peerId || peerId === myId) return; // ignore invalid/self
+
+        if (!peersRef.current[peerId]) {
+          console.log("New peer joined → WAITING for OFFER from", peerId);
+          await createPeer(peerId, false); // isCaller = false
         }
         break;
       }
 
       case "offer":
-        await handleOffer(data, socket);
+        console.log("Received OFFER from", data.from);
+        await handleOffer(data);
         break;
 
       case "answer":
+        console.log("Received ANSWER from", data.from);
         await handleAnswer(data);
         break;
 
       case "candidate":
+        console.log("Received CANDIDATE from", data.from);
         await handleCandidate(data);
         break;
 
@@ -240,7 +246,6 @@ export default function WebRTCRoom() {
     }?room=${encodeURIComponent(trimmed)}`;
     setShareLink(link);
 
-    // 🔥 Disable UI — user has joined
     setIsJoined(true);
   };
 
@@ -266,27 +271,30 @@ export default function WebRTCRoom() {
     if (localStream) {
       localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
     }
-
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        console.log("Sending ICE candidate to", peerId);
+        console.log("📤 Sending ICE candidate to", peerId, e.candidate);
+
         safeSendWS({
           type: "candidate",
           candidate: e.candidate,
           to: peerId,
           from: myId,
         });
+      } else {
+        console.log("🛑 ICE gathering finished for", peerId);
       }
     };
 
     pc.ontrack = (e) => {
       const [remoteStream] = e.streams;
       if (remoteStream) {
-        console.log("Received remote stream from", peerId);
-        addRemoteVideo(peerId, remoteStream);
-        // NOTE: at this point you could start remote STT by
-        // creating a MediaRecorder on remoteStream.getAudioTracks()
-        // and then calling updateRemoteSubtitle(peerId, text) with results.
+        console.log("Remote stream received from", peerId);
+
+        setRemoteStreams((prev) => ({
+          ...prev,
+          [peerId]: remoteStream,
+        }));
       }
     };
 
@@ -359,6 +367,15 @@ export default function WebRTCRoom() {
     const pc = peersRef.current[peerId];
     if (!pc) return;
 
+    // VALID STATE: "have-local-offer"
+    if (pc.signalingState !== "have-local-offer") {
+      console.warn(
+        "Ignoring ANSWER because signalingState:",
+        pc.signalingState
+      );
+      return;
+    }
+
     try {
       console.log("Setting remote description (answer) from", peerId);
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
@@ -383,67 +400,15 @@ export default function WebRTCRoom() {
     }
   };
 
-  const addRemoteVideo = (peerId, stream) => {
-    if (!videosRef.current) return;
-
-    let wrapper = document.getElementById("wrap-" + peerId);
-    if (!wrapper) {
-      wrapper = document.createElement("div");
-      wrapper.id = "wrap-" + peerId;
-      wrapper.style.border = "1px solid #333";
-      wrapper.style.padding = "8px";
-      wrapper.style.borderRadius = "10px";
-      wrapper.style.background = "#111";
-      wrapper.style.position = "relative";
-      wrapper.style.color = "white";
-      wrapper.style.fontSize = "12px";
-      wrapper.style.display = "flex";
-      wrapper.style.flexDirection = "column";
-      wrapper.style.gap = "4px";
-
-      const title = document.createElement("div");
-      title.innerText = "Peer: " + peerId.substring(0, 6);
-      title.style.opacity = "0.7";
-      title.style.fontSize = "11px";
-      wrapper.appendChild(title);
-
-      const subtitle = document.createElement("div");
-      subtitle.id = "sub-" + peerId;
-      subtitle.style.position = "absolute";
-      subtitle.style.left = "8px";
-      subtitle.style.right = "8px";
-      subtitle.style.bottom = "8px";
-      subtitle.style.background = "rgba(0,0,0,0.7)";
-      subtitle.style.padding = "4px 6px";
-      subtitle.style.borderRadius = "6px";
-      subtitle.style.fontSize = "13px";
-      subtitle.style.display = "none";
-      wrapper.appendChild(subtitle);
-
-      videosRef.current.appendChild(wrapper);
-    }
-
-    let vid = document.getElementById("video-" + peerId);
-    if (!vid) {
-      vid = document.createElement("video");
-      vid.id = "video-" + peerId;
-      vid.autoplay = true;
-      vid.playsInline = true;
-      vid.style.width = "100%";
-      vid.style.background = "#000";
-      vid.style.borderRadius = "6px";
-      wrapper.appendChild(vid);
-    }
-
-    vid.srcObject = stream;
-  };
-
   const removeVideo = (peerId) => {
-    const wrap = document.getElementById("wrap-" + peerId);
-    if (wrap && wrap.parentNode) {
-      wrap.parentNode.removeChild(wrap);
-    }
+    // Remove React video tile
+    setRemoteStreams((prev) => {
+      const copy = { ...prev };
+      delete copy[peerId];
+      return copy;
+    });
 
+    // Close RTCPeerConnection
     const pc = peersRef.current[peerId];
     if (pc) {
       try {
@@ -541,7 +506,6 @@ export default function WebRTCRoom() {
 
       const data = await res.json();
       if (data?.transcript) {
-        // show under your own video as subtitle
         setTranscript(data.transcript);
       }
     } catch (err) {
@@ -570,12 +534,12 @@ export default function WebRTCRoom() {
           placeholder="Enter Room ID"
           value={roomId}
           onChange={(e) => setRoomId(e.target.value)}
-          disabled={isJoined} // 🔥 disable when joined
+          disabled={isJoined}
         />
 
         <button
           onClick={() => joinRoom(roomId)}
-          disabled={isJoined || !roomId.trim()} // 🔥 disable when joined or empty
+          disabled={isJoined || !roomId.trim()}
         >
           {isJoined ? "Joined" : "Join Room"}
         </button>
@@ -657,13 +621,60 @@ export default function WebRTCRoom() {
           )}
         </div>
 
-        {/* Remote videos get appended here */}
-        <div
-          ref={videosRef}
-          style={{
-            display: "contents", // so remote wrappers join the grid
-          }}
-        />
+        {/* Remote videos rendered via React */}
+        {Object.entries(remoteStreams).map(([peerId, stream]) => (
+          <div
+            key={peerId}
+            id={"wrap-" + peerId}
+            style={{
+              border: "1px solid #333",
+              padding: 8,
+              borderRadius: 10,
+              background: "#111",
+              position: "relative",
+              color: "white",
+              fontSize: 12,
+              display: "flex",
+              flexDirection: "column",
+              gap: 4,
+            }}
+          >
+            <div style={{ opacity: 0.7, fontSize: 11 }}>
+              Peer: {peerId.substring(0, 6)}
+            </div>
+
+            <video
+              id={"video-" + peerId}
+              autoPlay
+              playsInline
+              style={{
+                width: "100%",
+                background: "#000",
+                borderRadius: 6,
+              }}
+              ref={(el) => {
+                if (el && el.srcObject !== stream) {
+                  el.srcObject = stream;
+                }
+              }}
+            />
+
+            <div
+              id={"sub-" + peerId}
+              style={{
+                position: "absolute",
+                left: 8,
+                right: 8,
+                bottom: 8,
+                background: "rgba(0,0,0,0.7)",
+                padding: "4px 6px",
+                borderRadius: 6,
+                fontSize: 13,
+                display: "none",
+              }}
+            />
+          </div>
+        ))}
       </div>
     </div>
   );
