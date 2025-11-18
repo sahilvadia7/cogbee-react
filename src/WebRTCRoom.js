@@ -537,7 +537,7 @@ useEffect(() => {
   // ------------------------------------------------------------
   return (
     <div style={{ padding: 20 }}>
-      <h2>Multi-User WebRTC Demo</h2>
+      <h2>Multi-User WebRTC 1</h2>
 
       <button onClick={createRoom}>Create Room</button>
       {createdLink && (
