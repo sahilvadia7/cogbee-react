@@ -42,7 +42,9 @@ export default function WebRTCRoom() {
     if (window.crypto && window.crypto.getRandomValues) {
       const arr = new Uint32Array(4);
       window.crypto.getRandomValues(arr);
-      return Array.from(arr, (v) => v.toString(36)).join("").slice(0, 12);
+      return Array.from(arr, (v) => v.toString(36))
+        .join("")
+        .slice(0, 12);
     }
     return Math.random().toString(36).slice(2, 14);
   };
@@ -158,7 +160,10 @@ export default function WebRTCRoom() {
         console.error("Error closing WS:", e);
       }
 
-      if (sttRecorderRef.current && sttRecorderRef.current.state !== "inactive") {
+      if (
+        sttRecorderRef.current &&
+        sttRecorderRef.current.state !== "inactive"
+      ) {
         sttRecorderRef.current.stop();
       }
 
@@ -196,14 +201,9 @@ export default function WebRTCRoom() {
       }
 
       // A new peer joined after you — server notifies you
-      case "new_peer": {
-        const peerId = data.peerId;
-        console.log("New peer joined:", peerId);
-        if (peerId && !peersRef.current[peerId]) {
-          await createPeer(peerId, true, socket); // existing user calls new peer
-        }
+      case "new_peer":
+        await createPeer(peerId, true);
         break;
-      }
 
       case "offer":
         await handleOffer(data, socket);
@@ -234,9 +234,9 @@ export default function WebRTCRoom() {
   // ------------------------------------------------------------
   const createRoom = () => {
     const id = generateSecureRoomId();
-    const link = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(
-      id
-    )}`;
+    const link = `${window.location.origin}${
+      window.location.pathname
+    }?room=${encodeURIComponent(id)}`;
     setCreatedLink(link);
     setRoomId(id);
     console.log("Room created:", id);
@@ -259,9 +259,9 @@ export default function WebRTCRoom() {
 
     safeSendWS({ type: "join", roomId: trimmed });
 
-    const link = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(
-      trimmed
-    )}`;
+    const link = `${window.location.origin}${
+      window.location.pathname
+    }?room=${encodeURIComponent(trimmed)}`;
     setShareLink(link);
   };
 
@@ -313,7 +313,10 @@ export default function WebRTCRoom() {
 
     pc.onconnectionstatechange = () => {
       console.log("Connection state with", peerId, ":", pc.connectionState);
-      if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+      if (
+        pc.connectionState === "failed" ||
+        pc.connectionState === "disconnected"
+      ) {
         console.warn("Peer disconnected/failed:", peerId);
         removeVideo(peerId);
       }
@@ -480,7 +483,9 @@ export default function WebRTCRoom() {
     if (isRecording) return;
 
     try {
-      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+      });
 
       const recorder = new MediaRecorder(audioStream, {
         mimeType: "audio/webm;codecs=opus",
