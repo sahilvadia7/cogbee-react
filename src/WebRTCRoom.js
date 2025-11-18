@@ -18,9 +18,7 @@ export default function WebRTCRoom() {
 
   const [isRecording, setIsRecording] = useState(false);
 
-  // Use env in real app: import.meta.env.VITE_API_BASE or process.env.REACT_APP_API_BASE
   const API_BASE = "https://delmar-drearier-arvilla.ngrok-free.dev";
-
   const wsRef = useRef(null);
 
   // ------------------------------------------------------------
@@ -41,7 +39,6 @@ export default function WebRTCRoom() {
   };
 
   const generateSecureRoomId = () => {
-    // More secure / less predictable than Math.random
     if (window.crypto && window.crypto.getRandomValues) {
       const arr = new Uint32Array(4);
       window.crypto.getRandomValues(arr);
@@ -81,7 +78,8 @@ export default function WebRTCRoom() {
           setRoomId(initialRoom);
         }
 
-        if (wsRef.current) return; 
+        // Avoid multiple WS creation (React StrictMode)
+        if (wsRef.current) return;
 
         const socket = new WebSocket(
           "wss://delmar-drearier-arvilla.ngrok-free.dev/signal"
@@ -91,7 +89,7 @@ export default function WebRTCRoom() {
         socket.onopen = () => {
           console.log("WS connected");
           if (initialRoom) {
-            // Auto-join if URL has room
+            console.log("Auto-joining room from URL:", initialRoom);
             joinRoom(initialRoom, socket);
           }
         };
@@ -99,6 +97,7 @@ export default function WebRTCRoom() {
         socket.onmessage = (msg) => {
           try {
             const data = JSON.parse(msg.data);
+            console.log("WS message:", data);
             handleSocket(data, socket);
           } catch (e) {
             console.error("Invalid WS message:", e);
@@ -120,7 +119,6 @@ export default function WebRTCRoom() {
         });
 
         if (!isMounted) {
-          // If component already unmounted, stop tracks immediately
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
@@ -131,8 +129,6 @@ export default function WebRTCRoom() {
         }
       } catch (err) {
         console.error("Init error (media or WS):", err);
-        // You may want to show UI error:
-        // setError("Cannot access camera/mic. Please check permissions.");
       }
     };
 
@@ -141,7 +137,6 @@ export default function WebRTCRoom() {
     return () => {
       isMounted = false;
 
-      // Cleanup
       try {
         if (wsRef.current) {
           wsRef.current.close();
@@ -170,18 +165,30 @@ export default function WebRTCRoom() {
     switch (data.type) {
       case "id": {
         if (typeof data.id === "string") {
+          console.log("My ID from server:", data.id);
           setMyId(data.id);
         }
         break;
       }
 
+      // List of peers already in the room (when *you* join)
       case "peers": {
         if (Array.isArray(data.peers)) {
+          console.log("Existing peers in room:", data.peers);
           for (const peerId of data.peers) {
-            if (peerId && peerId !== myId) {
-              await createPeer(peerId, true, socket);
-            }
+            if (!peerId) continue;
+            await createPeer(peerId, true, socket); // we are the caller
           }
+        }
+        break;
+      }
+
+      // A new peer joined after you — server notifies you
+      case "new_peer": {
+        const peerId = data.peerId;
+        console.log("New peer joined:", peerId);
+        if (peerId && !peersRef.current[peerId]) {
+          await createPeer(peerId, true, socket); // existing user calls new peer
         }
         break;
       }
@@ -199,7 +206,10 @@ export default function WebRTCRoom() {
         break;
 
       case "leave":
-        if (data.from) removeVideo(data.from);
+        if (data.from) {
+          console.log("Peer left:", data.from);
+          removeVideo(data.from);
+        }
         break;
 
       default:
@@ -217,6 +227,7 @@ export default function WebRTCRoom() {
     )}`;
     setCreatedLink(link);
     setRoomId(id);
+    console.log("Room created:", id);
   };
 
   const joinRoom = (id, socket = wsRef.current) => {
@@ -231,6 +242,7 @@ export default function WebRTCRoom() {
       return;
     }
 
+    console.log("Joining room:", trimmed);
     setRoomId(trimmed);
 
     safeSendWS({ type: "join", roomId: trimmed });
@@ -247,11 +259,12 @@ export default function WebRTCRoom() {
   const createPeer = async (peerId, isCaller, socket = wsRef.current) => {
     if (!peerId) return;
 
-    // Avoid creating duplicate peer connections
     if (peersRef.current[peerId]) {
       console.log("Peer already exists:", peerId);
       return;
     }
+
+    console.log("Creating RTCPeerConnection for:", peerId, "caller:", isCaller);
 
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -265,6 +278,7 @@ export default function WebRTCRoom() {
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
+        console.log("Sending ICE candidate to", peerId);
         safeSendWS({
           type: "candidate",
           candidate: e.candidate,
@@ -277,11 +291,13 @@ export default function WebRTCRoom() {
     pc.ontrack = (e) => {
       const [remoteStream] = e.streams;
       if (remoteStream) {
+        console.log("Received remote stream from", peerId);
         addRemoteVideo(peerId, remoteStream);
       }
     };
 
     pc.onconnectionstatechange = () => {
+      console.log("Connection state with", peerId, ":", pc.connectionState);
       if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
         console.warn("Peer disconnected/failed:", peerId);
         removeVideo(peerId);
@@ -293,6 +309,7 @@ export default function WebRTCRoom() {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
+        console.log("Sending offer to", peerId);
         safeSendWS({
           type: "offer",
           offer,
@@ -311,6 +328,7 @@ export default function WebRTCRoom() {
     if (!peerId || !offer) return;
 
     if (!peersRef.current[peerId]) {
+      console.log("Creating peer for incoming offer from", peerId);
       await createPeer(peerId, false, socket);
     }
 
@@ -318,11 +336,13 @@ export default function WebRTCRoom() {
     if (!pc) return;
 
     try {
+      console.log("Setting remote description (offer) from", peerId);
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
 
+      console.log("Sending answer to", peerId);
       safeSendWS({
         type: "answer",
         answer,
@@ -343,6 +363,7 @@ export default function WebRTCRoom() {
     if (!pc) return;
 
     try {
+      console.log("Setting remote description (answer) from", peerId);
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
     } catch (err) {
       console.error("Error setting remote answer:", err);
@@ -358,6 +379,7 @@ export default function WebRTCRoom() {
     if (!pc) return;
 
     try {
+      console.log("Adding ICE candidate from", peerId);
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (err) {
       console.error("Error adding ICE candidate:", err);
@@ -404,7 +426,6 @@ export default function WebRTCRoom() {
     if (isRecording) return;
 
     try {
-      // You could also reuse localStream.getAudioTracks() here if you want
       const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       const recorder = new MediaRecorder(audioStream, {
@@ -439,7 +460,6 @@ export default function WebRTCRoom() {
       };
 
       recorder.onstop = () => {
-        // Stop all tracks of that dedicated audio stream to release mic
         audioStream.getTracks().forEach((t) => t.stop());
       };
 
@@ -544,7 +564,7 @@ export default function WebRTCRoom() {
         ref={videosRef}
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(250px,1fr))",
+          gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))",
           gap: 10,
           marginTop: 20,
         }}
