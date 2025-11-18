@@ -81,12 +81,12 @@ export default function WebRTCRoom() {
   // ------------------------------------------------------------
   //  INIT
   // ------------------------------------------------------------
-  useEffect(() => {
+useEffect(() => {
   let isMounted = true;
 
   const init = async () => {
     try {
-      // 1️⃣ Always get camera/mic FIRST
+      // 1️⃣ Get camera/mic FIRST
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
@@ -104,21 +104,19 @@ export default function WebRTCRoom() {
       wsRef.current = socket;
 
       socket.onopen = () => {
-        console.log("WS connected");
+        console.log("WS OPEN");
 
         const params = new URLSearchParams(window.location.search);
-        const initialRoom = params.get("room");
-        if (initialRoom) {
-          joinRoom(initialRoom, socket);  // ← safe: localStream already exists
-        }
+        const r = params.get("room");
+        if (r) joinRoom(r, socket); // safe now: localStream exists
       };
 
       socket.onmessage = (msg) => handleSocket(JSON.parse(msg.data), socket);
+
       socket.onerror = console.error;
       socket.onclose = () => console.log("WS closed");
-      
     } catch (err) {
-      console.error("Init error:", err);
+      console.error("INIT ERROR", err);
     }
   };
 
@@ -127,7 +125,7 @@ export default function WebRTCRoom() {
   return () => {
     isMounted = false;
     if (wsRef.current) wsRef.current.close();
-    if (localStream) localStream.getTracks().forEach((t) => t.stop());
+    if (localStream) localStream.getTracks().forEach(t => t.stop());
   };
 }, []);
 
