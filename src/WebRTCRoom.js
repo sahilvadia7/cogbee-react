@@ -14,7 +14,7 @@ export default function WebRTCRoom() {
 
   const [createdLink, setCreatedLink] = useState("");
   const [shareLink, setShareLink] = useState("");
-  const [transcript, setTranscript] = useState("");
+  const [transcript, setTranscript] = useState(""); // used as local subtitle
 
   const [isRecording, setIsRecording] = useState(false);
 
@@ -62,6 +62,18 @@ export default function WebRTCRoom() {
       }
     });
     peersRef.current = {};
+  };
+
+  const updateRemoteSubtitle = (peerId, text) => {
+    const el = document.getElementById("sub-" + peerId);
+    if (!el) return;
+    if (!text) {
+      el.style.display = "none";
+      el.innerText = "";
+      return;
+    }
+    el.style.display = "block";
+    el.innerText = `Peer: ${text}`;
   };
 
   // ------------------------------------------------------------
@@ -293,6 +305,9 @@ export default function WebRTCRoom() {
       if (remoteStream) {
         console.log("Received remote stream from", peerId);
         addRemoteVideo(peerId, remoteStream);
+        // NOTE: at this point you could start remote STT by
+        // creating a MediaRecorder on remoteStream.getAudioTracks()
+        // and then calling updateRemoteSubtitle(peerId, text) with results.
       }
     };
 
@@ -388,24 +403,63 @@ export default function WebRTCRoom() {
 
   const addRemoteVideo = (peerId, stream) => {
     if (!videosRef.current) return;
-    let el = document.getElementById("video-" + peerId);
 
-    if (!el) {
-      el = document.createElement("video");
-      el.id = "video-" + peerId;
-      el.autoplay = true;
-      el.playsInline = true;
-      el.style.width = "100%";
-      el.style.background = "#000";
-      videosRef.current.appendChild(el);
+    let wrapper = document.getElementById("wrap-" + peerId);
+    if (!wrapper) {
+      wrapper = document.createElement("div");
+      wrapper.id = "wrap-" + peerId;
+      wrapper.style.border = "1px solid #333";
+      wrapper.style.padding = "8px";
+      wrapper.style.borderRadius = "10px";
+      wrapper.style.background = "#111";
+      wrapper.style.position = "relative";
+      wrapper.style.color = "white";
+      wrapper.style.fontSize = "12px";
+      wrapper.style.display = "flex";
+      wrapper.style.flexDirection = "column";
+      wrapper.style.gap = "4px";
+
+      const title = document.createElement("div");
+      title.innerText = "Peer: " + peerId.substring(0, 6);
+      title.style.opacity = "0.7";
+      title.style.fontSize = "11px";
+      wrapper.appendChild(title);
+
+      const subtitle = document.createElement("div");
+      subtitle.id = "sub-" + peerId;
+      subtitle.style.position = "absolute";
+      subtitle.style.left = "8px";
+      subtitle.style.right = "8px";
+      subtitle.style.bottom = "8px";
+      subtitle.style.background = "rgba(0,0,0,0.7)";
+      subtitle.style.padding = "4px 6px";
+      subtitle.style.borderRadius = "6px";
+      subtitle.style.fontSize = "13px";
+      subtitle.style.display = "none";
+      wrapper.appendChild(subtitle);
+
+      videosRef.current.appendChild(wrapper);
     }
-    el.srcObject = stream;
+
+    let vid = document.getElementById("video-" + peerId);
+    if (!vid) {
+      vid = document.createElement("video");
+      vid.id = "video-" + peerId;
+      vid.autoplay = true;
+      vid.playsInline = true;
+      vid.style.width = "100%";
+      vid.style.background = "#000";
+      vid.style.borderRadius = "6px";
+      wrapper.appendChild(vid);
+    }
+
+    vid.srcObject = stream;
   };
 
   const removeVideo = (peerId) => {
-    const el = document.getElementById("video-" + peerId);
-    if (el && el.parentNode) {
-      el.parentNode.removeChild(el);
+    const wrap = document.getElementById("wrap-" + peerId);
+    if (wrap && wrap.parentNode) {
+      wrap.parentNode.removeChild(wrap);
     }
 
     const pc = peersRef.current[peerId];
@@ -420,7 +474,7 @@ export default function WebRTCRoom() {
   };
 
   // ------------------------------------------------------------
-  //  AUDIO STT RECORDING
+  //  AUDIO STT RECORDING (LOCAL -> subtitle)
   // ------------------------------------------------------------
   const startRecording = async () => {
     if (isRecording) return;
@@ -503,6 +557,7 @@ export default function WebRTCRoom() {
 
       const data = await res.json();
       if (data?.transcript) {
+        // show under your own video as subtitle
         setTranscript(data.transcript);
       }
     } catch (err) {
@@ -561,7 +616,6 @@ export default function WebRTCRoom() {
       </pre>
 
       <div
-        ref={videosRef}
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))",
@@ -569,12 +623,55 @@ export default function WebRTCRoom() {
           marginTop: 20,
         }}
       >
-        <video
-          ref={localVideoRef}
-          autoPlay
-          muted
-          playsInline
-          style={{ width: "100%", background: "#000" }}
+        {/* Local video tile */}
+        <div
+          id="wrap-local"
+          style={{
+            border: "1px solid #333",
+            padding: 8,
+            borderRadius: 10,
+            background: "#111",
+            position: "relative",
+            color: "white",
+            fontSize: 12,
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          <div style={{ opacity: 0.7, fontSize: 11 }}>You</div>
+          <video
+            ref={localVideoRef}
+            autoPlay
+            muted
+            playsInline
+            style={{ width: "100%", background: "#000", borderRadius: 6 }}
+          />
+          {transcript && (
+            <div
+              id="sub-local"
+              style={{
+                position: "absolute",
+                left: 8,
+                right: 8,
+                bottom: 8,
+                background: "rgba(0,0,0,0.7)",
+                padding: "4px 6px",
+                borderRadius: 6,
+                fontSize: 13,
+              }}
+            >
+              You: {transcript}
+            </div>
+          )}
+        </div>
+
+        {/* Remote videos get appended here */}
+        <div
+          ref={videosRef}
+          style={{
+            display: "contents", // so remote wrappers join the grid
+          }}
         />
       </div>
     </div>
