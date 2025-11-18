@@ -82,96 +82,55 @@ export default function WebRTCRoom() {
   //  INIT
   // ------------------------------------------------------------
   useEffect(() => {
-    let isMounted = true;
+  let isMounted = true;
 
-    const init = async () => {
-      try {
+  const init = async () => {
+    try {
+      // 1️⃣ Always get camera/mic FIRST
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+
+      if (!isMounted) return;
+
+      setLocalStream(stream);
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+
+      // 2️⃣ Only THEN open WebSocket
+      const socket = new WebSocket("wss://delmar-drearier-arvilla.ngrok-free.dev/signal");
+      wsRef.current = socket;
+
+      socket.onopen = () => {
+        console.log("WS connected");
+
         const params = new URLSearchParams(window.location.search);
-        const initialRoom = params.get("room") || "";
-        if (!roomId) {
-          setRoomId(initialRoom);
+        const initialRoom = params.get("room");
+        if (initialRoom) {
+          joinRoom(initialRoom, socket);  // ← safe: localStream already exists
         }
+      };
 
-        // Avoid multiple WS creation (React StrictMode)
-        if (wsRef.current) return;
+      socket.onmessage = (msg) => handleSocket(JSON.parse(msg.data), socket);
+      socket.onerror = console.error;
+      socket.onclose = () => console.log("WS closed");
+      
+    } catch (err) {
+      console.error("Init error:", err);
+    }
+  };
 
-        const socket = new WebSocket(
-          "wss://delmar-drearier-arvilla.ngrok-free.dev/signal"
-        );
-        wsRef.current = socket;
+  init();
 
-        socket.onopen = () => {
-          console.log("WS connected");
-          if (initialRoom) {
-            console.log("Auto-joining room from URL:", initialRoom);
-            joinRoom(initialRoom, socket);
-          }
-        };
+  return () => {
+    isMounted = false;
+    if (wsRef.current) wsRef.current.close();
+    if (localStream) localStream.getTracks().forEach((t) => t.stop());
+  };
+}, []);
 
-        socket.onmessage = (msg) => {
-          try {
-            const data = JSON.parse(msg.data);
-            console.log("WS message:", data);
-            handleSocket(data, socket);
-          } catch (e) {
-            console.error("Invalid WS message:", e);
-          }
-        };
-
-        socket.onerror = (err) => {
-          console.error("WS error:", err);
-        };
-
-        socket.onclose = () => {
-          console.log("WS closed");
-        };
-
-        // Get user media
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true,
-        });
-
-        if (!isMounted) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-
-        setLocalStream(stream);
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
-        }
-      } catch (err) {
-        console.error("Init error (media or WS):", err);
-      }
-    };
-
-    init();
-
-    return () => {
-      isMounted = false;
-
-      try {
-        if (wsRef.current) {
-          wsRef.current.close();
-          wsRef.current = null;
-        }
-      } catch (e) {
-        console.error("Error closing WS:", e);
-      }
-
-      if (
-        sttRecorderRef.current &&
-        sttRecorderRef.current.state !== "inactive"
-      ) {
-        sttRecorderRef.current.stop();
-      }
-
-      stopLocalStream();
-      closeAllPeers();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // ------------------------------------------------------------
   //  SOCKET
