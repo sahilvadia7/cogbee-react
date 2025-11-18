@@ -8,6 +8,7 @@ export default function WebRTCRoom() {
   const sessionIdRef = useRef(null);
 
   const [roomId, setRoomId] = useState("");
+  const [isJoined, setIsJoined] = useState("");
   const [myId, setMyId] = useState(null);
   const [localStream, setLocalStream] = useState(null);
   const peersRef = useRef({});
@@ -81,54 +82,67 @@ export default function WebRTCRoom() {
   // ------------------------------------------------------------
   //  INIT
   // ------------------------------------------------------------
-useEffect(() => {
-  let isMounted = true;
+  useEffect(() => {
+    let isMounted = true;
 
-  const init = async () => {
-    try {
-      // 1️⃣ Get camera/mic FIRST
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      });
+    const setupMediaThenConnectWS = async () => {
+      try {
+        console.log("Requesting camera/mic...");
 
-      if (!isMounted) return;
+        // 1️⃣ GET USER MEDIA FIRST — block everything until this finishes
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
 
-      setLocalStream(stream);
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
+        console.log("🎥 Camera/Mic ready!");
+
+        if (!isMounted) return;
+
+        setLocalStream(stream);
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+
+        // 2️⃣ ONLY NOW create WebSocket
+        console.log("Connecting WebSocket...");
+        const socket = new WebSocket(
+          "wss://delmar-drearier-arvilla.ngrok-free.dev/signal"
+        );
+        wsRef.current = socket;
+
+        socket.onopen = () => {
+          console.log("🔥 WS OPEN AFTER MEDIA READY");
+
+          const params = new URLSearchParams(window.location.search);
+          const r = params.get("room");
+          if (r) {
+            console.log("Joining room after media ready:", r);
+            joinRoom(r, socket);
+          }
+        };
+
+        socket.onmessage = (msg) => {
+          const data = JSON.parse(msg.data);
+          console.log("WS MSG:", data);
+          handleSocket(data, socket);
+        };
+
+        socket.onerror = console.error;
+        socket.onclose = () => console.log("WS closed");
+      } catch (err) {
+        console.error("❌ Media init error:", err);
       }
+    };
 
-      // 2️⃣ Only THEN open WebSocket
-      const socket = new WebSocket("wss://delmar-drearier-arvilla.ngrok-free.dev/signal");
-      wsRef.current = socket;
+    setupMediaThenConnectWS();
 
-      socket.onopen = () => {
-        console.log("WS OPEN");
-
-        const params = new URLSearchParams(window.location.search);
-        const r = params.get("room");
-        if (r) joinRoom(r, socket); // safe now: localStream exists
-      };
-
-      socket.onmessage = (msg) => handleSocket(JSON.parse(msg.data), socket);
-
-      socket.onerror = console.error;
-      socket.onclose = () => console.log("WS closed");
-    } catch (err) {
-      console.error("INIT ERROR", err);
-    }
-  };
-
-  init();
-
-  return () => {
-    isMounted = false;
-    if (wsRef.current) wsRef.current.close();
-    if (localStream) localStream.getTracks().forEach(t => t.stop());
-  };
-}, []);
-
+    return () => {
+      isMounted = false;
+      if (wsRef.current) wsRef.current.close();
+      if (localStream) localStream.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
 
   // ------------------------------------------------------------
   //  SOCKET
@@ -159,13 +173,13 @@ useEffect(() => {
 
       // A new peer joined after you — server notifies you
       case "new_peer": {
-      const peerId = data.peerId;     // <-- FIX HERE
-      console.log("New peer joined:", peerId);
-      if (peerId && !peersRef.current[peerId]) {
-        await createPeer(peerId, true, socket);
+        const peerId = data.peerId; // <-- FIX HERE
+        console.log("New peer joined:", peerId);
+        if (peerId && !peersRef.current[peerId]) {
+          await createPeer(peerId, true, socket);
+        }
+        break;
       }
-      break;
-    }
 
       case "offer":
         await handleOffer(data, socket);
@@ -225,6 +239,9 @@ useEffect(() => {
       window.location.pathname
     }?room=${encodeURIComponent(trimmed)}`;
     setShareLink(link);
+
+    // 🔥 Disable UI — user has joined
+    setIsJoined(true);
   };
 
   // ------------------------------------------------------------
@@ -553,8 +570,15 @@ useEffect(() => {
           placeholder="Enter Room ID"
           value={roomId}
           onChange={(e) => setRoomId(e.target.value)}
+          disabled={isJoined} // 🔥 disable when joined
         />
-        <button onClick={() => joinRoom(roomId)}>Join Room</button>
+
+        <button
+          onClick={() => joinRoom(roomId)}
+          disabled={isJoined || !roomId.trim()} // 🔥 disable when joined or empty
+        >
+          {isJoined ? "Joined" : "Join Room"}
+        </button>
       </div>
 
       {shareLink && (
