@@ -201,9 +201,14 @@ export default function WebRTCRoom() {
       }
 
       // A new peer joined after you — server notifies you
-      case "new_peer":
-        await createPeer(peerId, true);
-        break;
+      case "new_peer": {
+      const peerId = data.peerId;     // <-- FIX HERE
+      console.log("New peer joined:", peerId);
+      if (peerId && !peersRef.current[peerId]) {
+        await createPeer(peerId, true, socket);
+      }
+      break;
+    }
 
       case "offer":
         await handleOffer(data, socket);
