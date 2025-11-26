@@ -13,26 +13,24 @@ export default function WebRTCRoom() {
   const peersRef = useRef({});
 
   const [remoteStreams, setRemoteStreams] = useState({});
-
   const [createdLink, setCreatedLink] = useState("");
   const [shareLink, setShareLink] = useState("");
-  const [transcript, setTranscript] = useState(""); // used as local subtitle
-
+  const [transcript, setTranscript] = useState("");
   const [isRecording, setIsRecording] = useState(false);
 
   const API_BASE = "https://delmar-drearier-arvilla.ngrok-free.dev";
   const wsRef = useRef(null);
 
-  // ------------------------------------------------------------
+  // NEW → interval for sending video frame chunks
+  const frameIntervalRef = useRef(null);
+
+  // --------------------------------------------------------------------
   //  HELPERS
-  // ------------------------------------------------------------
+  // --------------------------------------------------------------------
   const safeSendWS = (msg) => {
     const socket = wsRef.current;
     if (!socket) return;
-    if (socket.readyState !== WebSocket.OPEN) {
-      console.warn("WebSocket not open, cannot send:", msg);
-      return;
-    }
+    if (socket.readyState !== WebSocket.OPEN) return;
     try {
       socket.send(JSON.stringify(msg));
     } catch (err) {
@@ -44,21 +42,13 @@ export default function WebRTCRoom() {
     if (window.crypto && window.crypto.getRandomValues) {
       const arr = new Uint32Array(4);
       window.crypto.getRandomValues(arr);
-      return Array.from(arr, (v) => v.toString(36))
-        .join("")
-        .slice(0, 12);
+      return Array.from(arr, (v) => v.toString(36)).join("").slice(0, 12);
     }
     return Math.random().toString(36).slice(2, 14);
   };
 
   const closeAllPeers = () => {
-    Object.values(peersRef.current).forEach((pc) => {
-      try {
-        pc.close();
-      } catch (e) {
-        console.error("Error closing peer:", e);
-      }
-    });
+    Object.values(peersRef.current).forEach((pc) => pc.close());
     peersRef.current = {};
     setRemoteStreams({});
   };
@@ -75,9 +65,9 @@ export default function WebRTCRoom() {
     el.innerText = `Peer: ${text}`;
   };
 
-  // ------------------------------------------------------------
+  // --------------------------------------------------------------------
   //  INIT
-  // ------------------------------------------------------------
+  // --------------------------------------------------------------------
   useEffect(() => {
     let isMounted = true;
 
@@ -100,26 +90,19 @@ export default function WebRTCRoom() {
         }
 
         console.log("Connecting WebSocket...");
-        const socket = new WebSocket(
-          "wss://delmar-drearier-arvilla.ngrok-free.dev/signal"
-        );
+        const socket = new WebSocket(`${API_BASE.replace("https", "wss")}/signal`);
         wsRef.current = socket;
 
         socket.onopen = () => {
           console.log("🔥 WS OPEN AFTER MEDIA READY");
-
           const params = new URLSearchParams(window.location.search);
           const r = params.get("room");
-          if (r) {
-            console.log("Joining room after media ready:", r);
-            joinRoom(r, socket);
-          }
+          if (r) joinRoom(r, socket);
         };
 
         socket.onmessage = (msg) => {
           const data = JSON.parse(msg.data);
-          console.log("WS MSG:", data);
-          handleSocket(data, socket);
+          handleSocket(data);
         };
 
         socket.onerror = console.error;
@@ -140,127 +123,120 @@ export default function WebRTCRoom() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ------------------------------------------------------------
-  //  SOCKET
-  // ------------------------------------------------------------
-  const handleSocket = async (data, socket) => {
-    if (!data || typeof data !== "object") return;
+  // --------------------------------------------------------------------
+  //  CAPTURE FRAME + SEND FRAME CHUNKS
+  // --------------------------------------------------------------------
+  const captureFrame = () => {
+    try {
+      const video = localVideoRef.current;
+      if (!video) return null;
 
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0);
+
+      return canvas.toDataURL("image/jpeg", 0.7);
+    } catch (e) {
+      console.error("Frame capture error:", e);
+      return null;
+    }
+  };
+
+  const sendFrameChunk = async () => {
+  if (!sessionIdRef.current) return;
+
+  const base64 = captureFrame();
+  if (!base64) return;
+
+  try {
+    await fetch(`${API_BASE}/api/interview/frame-check`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: sessionIdRef.current,
+        frame: base64
+      })
+    });
+
+    console.log("📤 Compressed frame sent");
+  } catch (err) {
+    console.error("Frame upload error:", err);
+  }
+};
+
+
+  // --------------------------------------------------------------------
+  //  SOCKET HANDLING
+  // --------------------------------------------------------------------
+  const handleSocket = async (data) => {
     switch (data.type) {
-      case "id": {
-        if (typeof data.id === "string") {
-          console.log("My ID from server:", data.id);
-          setMyId(data.id);
+      case "id":
+        setMyId(data.id);
+        break;
+
+      case "peers":
+        for (const peerId of data.peers) {
+          if (peerId) createPeer(peerId, true);
         }
         break;
-      }
 
-      // YOU just joined, server gives existing peers → YOU CALL THEM
-      case "peers": {
-        if (Array.isArray(data.peers)) {
-          console.log("Existing peers in room:", data.peers);
-
-          for (const peerId of data.peers) {
-            if (!peerId) continue;
-
-            console.log("Calling existing peer:", peerId);
-            await createPeer(peerId, true); // isCaller = true
-          }
-        }
+      case "new_peer":
+        if (data.peerId !== myId) createPeer(data.peerId, false);
         break;
-      }
-
-      // A new peer joined after you → THEY WILL CALL YOU
-      case "new_peer": {
-        const peerId = data.peerId;
-        console.log("New peer joined:", peerId);
-
-        if (!peerId || peerId === myId) return; // ignore invalid/self
-
-        if (!peersRef.current[peerId]) {
-          console.log("New peer joined → WAITING for OFFER from", peerId);
-          await createPeer(peerId, false); // isCaller = false
-        }
-        break;
-      }
 
       case "offer":
-        console.log("Received OFFER from", data.from);
         await handleOffer(data);
         break;
 
       case "answer":
-        console.log("Received ANSWER from", data.from);
         await handleAnswer(data);
         break;
 
       case "candidate":
-        console.log("Received CANDIDATE from", data.from);
         await handleCandidate(data);
         break;
 
       case "leave":
-        if (data.from) {
-          console.log("Peer left:", data.from);
-          removeVideo(data.from);
-        }
+        removeVideo(data.from);
         break;
 
       default:
-        console.warn("Unknown message type:", data.type);
+        console.warn("Unknown:", data);
     }
   };
 
-  // ------------------------------------------------------------
-  //  ROOM
-  // ------------------------------------------------------------
+  // --------------------------------------------------------------------
+  //  ROOM CONTROL
+  // --------------------------------------------------------------------
   const createRoom = () => {
     const id = generateSecureRoomId();
-    const link = `${window.location.origin}${
-      window.location.pathname
-    }?room=${encodeURIComponent(id)}`;
+    const link = `${window.location.origin}${window.location.pathname}?room=${id}`;
     setCreatedLink(link);
     setRoomId(id);
-    console.log("Room created:", id);
   };
 
   const joinRoom = (id, socket = wsRef.current) => {
-    const trimmed = (id || "").trim();
-    if (!trimmed) {
-      console.warn("Room ID required");
-      return;
-    }
+    if (!id.trim()) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      console.warn("Cannot join, WS not open");
-      return;
-    }
+    setRoomId(id);
+    safeSendWS({ type: "join", roomId: id });
 
-    console.log("Joining room:", trimmed);
-    setRoomId(trimmed);
-
-    safeSendWS({ type: "join", roomId: trimmed });
-
-    const link = `${window.location.origin}${
-      window.location.pathname
-    }?room=${encodeURIComponent(trimmed)}`;
+    const link = `${window.location.origin}${window.location.pathname}?room=${id}`;
     setShareLink(link);
-
     setIsJoined(true);
   };
 
-  // ------------------------------------------------------------
-  //  WEBRTC
-  // ------------------------------------------------------------
-  const createPeer = async (peerId, isCaller, socket = wsRef.current) => {
+  // --------------------------------------------------------------------
+  // WEBRTC
+  // --------------------------------------------------------------------
+  const createPeer = async (peerId, isCaller) => {
     if (!peerId) return;
 
-    if (peersRef.current[peerId]) {
-      console.log("Peer already exists:", peerId);
-      return;
-    }
-
-    console.log("Creating RTCPeerConnection for:", peerId, "caller:", isCaller);
+    if (peersRef.current[peerId]) return;
 
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -268,168 +244,88 @@ export default function WebRTCRoom() {
 
     peersRef.current[peerId] = pc;
 
+    // attach local tracks
     if (localStream) {
       localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
     }
+
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        console.log("📤 Sending ICE candidate to", peerId, e.candidate);
-
         safeSendWS({
           type: "candidate",
           candidate: e.candidate,
           to: peerId,
           from: myId,
         });
-      } else {
-        console.log("🛑 ICE gathering finished for", peerId);
       }
     };
 
     pc.ontrack = (e) => {
-      const [remoteStream] = e.streams;
-      if (remoteStream) {
-        console.log("Remote stream received from", peerId);
-
-        setRemoteStreams((prev) => ({
-          ...prev,
-          [peerId]: remoteStream,
-        }));
+      const [stream] = e.streams;
+      if (stream) {
+        setRemoteStreams((prev) => ({ ...prev, [peerId]: stream }));
       }
     };
 
     pc.onconnectionstatechange = () => {
-      console.log("Connection state with", peerId, ":", pc.connectionState);
-      if (
-        pc.connectionState === "failed" ||
-        pc.connectionState === "disconnected"
-      ) {
-        console.warn("Peer disconnected/failed:", peerId);
+      if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
         removeVideo(peerId);
       }
     };
 
     if (isCaller) {
-      try {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
 
-        console.log("Sending offer to", peerId);
-        safeSendWS({
-          type: "offer",
-          offer,
-          to: peerId,
-          from: myId,
-        });
-      } catch (err) {
-        console.error("Error creating offer:", err);
-      }
+      safeSendWS({ type: "offer", offer, to: peerId, from: myId });
     }
   };
 
-  const handleOffer = async (data, socket = wsRef.current) => {
-    const peerId = data?.from;
-    const offer = data?.offer;
-    if (!peerId || !offer) return;
-
-    if (!peersRef.current[peerId]) {
-      console.log("Creating peer for incoming offer from", peerId);
-      await createPeer(peerId, false, socket);
-    }
-
-    const pc = peersRef.current[peerId];
+  const handleOffer = async (data) => {
+    const pc = peersRef.current[data.from];
     if (!pc) return;
 
-    try {
-      console.log("Setting remote description (offer) from", peerId);
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
 
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-
-      console.log("Sending answer to", peerId);
-      safeSendWS({
-        type: "answer",
-        answer,
-        to: peerId,
-        from: myId,
-      });
-    } catch (err) {
-      console.error("Error handling offer:", err);
-    }
+    safeSendWS({ type: "answer", answer, to: data.from, from: myId });
   };
 
   const handleAnswer = async (data) => {
-    const peerId = data?.from;
-    const answer = data?.answer;
-    if (!peerId || !answer) return;
-
-    const pc = peersRef.current[peerId];
+    const pc = peersRef.current[data.from];
     if (!pc) return;
 
-    // VALID STATE: "have-local-offer"
-    if (pc.signalingState !== "have-local-offer") {
-      console.warn(
-        "Ignoring ANSWER because signalingState:",
-        pc.signalingState
-      );
-      return;
-    }
-
-    try {
-      console.log("Setting remote description (answer) from", peerId);
-      await pc.setRemoteDescription(new RTCSessionDescription(answer));
-    } catch (err) {
-      console.error("Error setting remote answer:", err);
-    }
+    await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
   };
 
   const handleCandidate = async (data) => {
-    const peerId = data?.from;
-    const candidate = data?.candidate;
-    if (!peerId || !candidate) return;
-
-    const pc = peersRef.current[peerId];
+    const pc = peersRef.current[data.from];
     if (!pc) return;
-
-    try {
-      console.log("Adding ICE candidate from", peerId);
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (err) {
-      console.error("Error adding ICE candidate:", err);
-    }
+    await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
   };
 
   const removeVideo = (peerId) => {
-    // Remove React video tile
     setRemoteStreams((prev) => {
       const copy = { ...prev };
       delete copy[peerId];
       return copy;
     });
 
-    // Close RTCPeerConnection
-    const pc = peersRef.current[peerId];
-    if (pc) {
-      try {
-        pc.close();
-      } catch (e) {
-        console.error("Error closing peer:", e);
-      }
+    if (peersRef.current[peerId]) {
+      peersRef.current[peerId].close();
+      delete peersRef.current[peerId];
     }
-    delete peersRef.current[peerId];
   };
 
-  // ------------------------------------------------------------
-  //  AUDIO STT RECORDING (LOCAL -> subtitle)
-  // ------------------------------------------------------------
+  // --------------------------------------------------------------------
+  //  START RECORDING = AUDIO + FRAME STREAMING
+  // --------------------------------------------------------------------
   const startRecording = async () => {
     if (isRecording) return;
 
     try {
-      const audioStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-      });
+      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       const recorder = new MediaRecorder(audioStream, {
         mimeType: "audio/webm;codecs=opus",
@@ -441,24 +337,25 @@ export default function WebRTCRoom() {
 
       setIsRecording(true);
 
+      // 🔥 Start sending video frames every 5 seconds
+      frameIntervalRef.current = setInterval(() => {
+        sendFrameChunk();
+      }, 5000);
+
       recorder.ondataavailable = async (e) => {
         if (e.data && e.data.size > 0) {
-          try {
-            const buf = await e.data.arrayBuffer();
+          const buf = await e.data.arrayBuffer();
 
-            await fetch(
-              `${API_BASE}/api/interview/answer-chunk?sessionId=${encodeURIComponent(
-                sessionIdRef.current
-              )}`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/octet-stream" },
-                body: buf,
-              }
-            );
-          } catch (err) {
-            console.error("Error sending audio chunk:", err);
-          }
+          await fetch(
+            `${API_BASE}/api/interview/answer-chunk?sessionId=${encodeURIComponent(
+              sessionIdRef.current
+            )}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/octet-stream" },
+              body: buf,
+            }
+          );
         }
       };
 
@@ -467,24 +364,23 @@ export default function WebRTCRoom() {
       };
 
       recorder.start(1000);
-      console.log("🎙 Recording Started:", sessionIdRef.current);
     } catch (err) {
-      console.error("Error starting recording (mic permission?):", err);
+      console.error("Error starting recording:", err);
     }
   };
 
+  // --------------------------------------------------------------------
+  //  STOP RECORDING
+  // --------------------------------------------------------------------
   const stopRecording = async () => {
-    if (!sttRecorderRef.current) {
-      console.error("Recorder not found!");
-      return;
+    // stop sending video frames
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
     }
 
-    try {
-      if (sttRecorderRef.current.state !== "inactive") {
-        sttRecorderRef.current.stop();
-      }
-    } catch (e) {
-      console.error("Error stopping recorder:", e);
+    if (sttRecorderRef.current?.state !== "inactive") {
+      sttRecorderRef.current.stop();
     }
 
     setIsRecording(false);
@@ -494,36 +390,27 @@ export default function WebRTCRoom() {
         `${API_BASE}/api/interview/answer-finish?sessionId=${encodeURIComponent(
           sessionIdRef.current
         )}`,
-        {
-          method: "POST",
-        }
+        { method: "POST" }
       );
 
-      if (!res.ok) {
-        console.error("Finish STT failed:", res.status);
-        return;
-      }
-
       const data = await res.json();
-      if (data?.transcript) {
-        setTranscript(data.transcript);
-      }
+      if (data?.transcript) setTranscript(data.transcript);
     } catch (err) {
-      console.error("Error finishing transcription:", err);
+      console.error("Error finishing:", err);
     }
   };
 
-  // ------------------------------------------------------------
+  // --------------------------------------------------------------------
   //  UI
-  // ------------------------------------------------------------
+  // --------------------------------------------------------------------
   return (
     <div style={{ padding: 20 }}>
-      <h2>Multi-User WebRTC 1</h2>
+      <h2>Multi-User WebRTC</h2>
 
       <button onClick={createRoom}>Create Room</button>
       {createdLink && (
         <div style={{ background: "#eee", padding: 10, marginTop: 10 }}>
-          Room Created! Share:
+          Room Created:
           <br />
           <b>{createdLink}</b>
         </div>
@@ -536,11 +423,7 @@ export default function WebRTCRoom() {
           onChange={(e) => setRoomId(e.target.value)}
           disabled={isJoined}
         />
-
-        <button
-          onClick={() => joinRoom(roomId)}
-          disabled={isJoined || !roomId.trim()}
-        >
+        <button onClick={() => joinRoom(roomId)} disabled={isJoined || !roomId.trim()}>
           {isJoined ? "Joined" : "Join Room"}
         </button>
       </div>
@@ -556,11 +439,7 @@ export default function WebRTCRoom() {
           Start Answer
         </button>
 
-        <button
-          onClick={stopRecording}
-          disabled={!isRecording}
-          style={{ marginLeft: 10 }}
-        >
+        <button onClick={stopRecording} disabled={!isRecording} style={{ marginLeft: 10 }}>
           Stop Answer
         </button>
       </div>
@@ -578,99 +457,46 @@ export default function WebRTCRoom() {
           marginTop: 20,
         }}
       >
-        {/* Local video tile */}
+        {/* Local video */}
         <div
-          id="wrap-local"
           style={{
             border: "1px solid #333",
             padding: 8,
             borderRadius: 10,
             background: "#111",
-            position: "relative",
             color: "white",
-            fontSize: 12,
-            display: "flex",
-            flexDirection: "column",
-            gap: 4,
           }}
         >
-          <div style={{ opacity: 0.7, fontSize: 11 }}>You</div>
+          <div>You</div>
           <video
             ref={localVideoRef}
             autoPlay
             muted
             playsInline
-            style={{ width: "100%", background: "#000", borderRadius: 6 }}
+            style={{ width: "100%", borderRadius: 6 }}
           />
-          {transcript && (
-            <div
-              id="sub-local"
-              style={{
-                position: "absolute",
-                left: 8,
-                right: 8,
-                bottom: 8,
-                background: "rgba(0,0,0,0.7)",
-                padding: "4px 6px",
-                borderRadius: 6,
-                fontSize: 13,
-              }}
-            >
-              You: {transcript}
-            </div>
-          )}
         </div>
 
-        {/* Remote videos rendered via React */}
+        {/* Remote videos */}
         {Object.entries(remoteStreams).map(([peerId, stream]) => (
           <div
             key={peerId}
-            id={"wrap-" + peerId}
             style={{
               border: "1px solid #333",
               padding: 8,
               borderRadius: 10,
               background: "#111",
-              position: "relative",
               color: "white",
-              fontSize: 12,
-              display: "flex",
-              flexDirection: "column",
-              gap: 4,
             }}
           >
-            <div style={{ opacity: 0.7, fontSize: 11 }}>
-              Peer: {peerId.substring(0, 6)}
-            </div>
+            <div>Peer: {peerId.substring(0, 6)}</div>
 
             <video
-              id={"video-" + peerId}
               autoPlay
               playsInline
-              style={{
-                width: "100%",
-                background: "#000",
-                borderRadius: 6,
-              }}
+              style={{ width: "100%", borderRadius: 6 }}
               ref={(el) => {
-                if (el && el.srcObject !== stream) {
-                  el.srcObject = stream;
-                }
-              }}
-            />
-
-            <div
-              id={"sub-" + peerId}
-              style={{
-                position: "absolute",
-                left: 8,
-                right: 8,
-                bottom: 8,
-                background: "rgba(0,0,0,0.7)",
-                padding: "4px 6px",
-                borderRadius: 6,
-                fontSize: 13,
-                display: "none",
+                if (el && el.srcObject !== stream) el.srcObject = stream;
               }}
             />
           </div>
